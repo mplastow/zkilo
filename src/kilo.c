@@ -15,9 +15,22 @@
 // bitwise AND Ctrl-key with a given character
 #define CTRL_KEY(k) ((k) & 0x1f)
 
+enum editorKey {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
+};
+
 
 /*** data ***/
 struct editorConfig {
+    int cx, cy;
     int screenrows;
     int screencols;
     struct termios orig_termios;
@@ -79,9 +92,10 @@ void enableRawMode(void) {
 }
 
 // Return keypresses from the terminal
-char editorReadKey(void) {
+int editorReadKey(void) {
     int nread = 1;
     char c;
+
     // Run until keypress is detected, then read it to c
     while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
         // Read each character as it is typed, or exit the program on failure
@@ -91,7 +105,55 @@ char editorReadKey(void) {
         }
     }
 
-    return c;
+    // Handle escape characters by reading the next two bytes into buffer seq
+    if (c == '\x1b') {
+        char seq[3];
+
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) {
+            return '\x1b';
+        }
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) {
+            return '\x1b';
+        }
+
+        // Return correct arrow key based on contents of escape sequence
+        if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) {
+                    return '\x1b';
+                }
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                        case '1': return HOME_KEY;
+                        case '3': return DEL_KEY;
+                        case '4': return END_KEY;
+                        case '5': return PAGE_UP;
+                        case '6': return PAGE_DOWN;
+                        case '7': return HOME_KEY;
+                        case '8': return END_KEY;
+                    }
+                }
+            } else {
+                switch (seq[1]) {
+                    case 'A': return ARROW_UP;
+                    case 'B': return ARROW_DOWN;
+                    case 'C': return ARROW_RIGHT;
+                    case 'D': return ARROW_LEFT;
+                    case 'H': return HOME_KEY;
+                    case 'F': return END_KEY;
+                }
+            }
+        } else if (seq[0] == 'O') {
+            switch (seq[1]) {
+                case 'H': return HOME_KEY;
+                case 'F': return END_KEY;
+            }
+        }
+
+        return '\x1b';
+    } else {
+        return c;
+    }
 }
 
 int getCursorPosition(int* rows, int* cols) {
@@ -124,16 +186,17 @@ int getCursorPosition(int* rows, int* cols) {
 
 int getWindowSize(int* rows, int* cols) {
     struct winsize ws;
-    // Get the number of rows and cols in the window, or exit on failure
+    // Easy way: Get the number of rows and cols from the terminal controller
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        // Attempt to move the cursor to bottom-right corner, or exit on failure
+        // Hard way: Attempt to move the cursor to bottom-right corner, or exit on failure
         if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) {
             return -1;
         }
+        // Return cursor position
         return getCursorPosition(rows, cols);
     } else {
-        *cols = ws.ws_col;
         *rows = ws.ws_row;
+        *cols = ws.ws_col;
         return 0;
     }
 }
@@ -169,17 +232,71 @@ void abFree(struct abuf* ab) {
 
 /*** input ***/
 
+// Move cursor using WASD
+void editorMoveCursor(int key) {
+    switch (key) {
+        case ARROW_LEFT: {
+            if (E.cx != 0) {
+                E.cx--;
+            }
+            break;
+        }
+        case ARROW_RIGHT: {
+            if (E.cx != E.screencols - 1) {
+                E.cx++;
+            }
+            break;
+        }
+        case ARROW_UP: {
+            if (E.cy != 0) {
+                E.cy--;
+            }
+            break;
+        }
+        case ARROW_DOWN: {
+            if (E.cy != E.screenrows - 1) {
+                E.cy++;
+            }
+            break;
+        }
+    }
+}
+
 // Handle keypresses
 void editorProcessKeypress(void) {
-    char c = editorReadKey();
+    int c = editorReadKey();
 
     // Exit on 'ctrl-q'
     switch (c) {
         case CTRL_KEY('q'): {
-        // Clear screen (see editorProcessKeypress())
+        // Clear screen (see editorProcessKeypress()) and exit code 0
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
+            break;
+        }
+
+        case HOME_KEY: {
+            E.cx = 0;
+            break;
+        }
+        case END_KEY: {
+            E.cx = E.screencols - 1;
+            break;
+        }
+
+        // Move using page up and page down
+        case PAGE_UP: case PAGE_DOWN: {
+            int times = E.screenrows;
+            while (times--) {
+                editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN); // ternary op!
+            }
+            break;
+        }
+
+        // Move cursor using arrow keys
+        case ARROW_LEFT: case ARROW_RIGHT: case ARROW_UP: case ARROW_DOWN: {
+            editorMoveCursor(c);
             break;
         }
     }
@@ -190,7 +307,7 @@ void editorProcessKeypress(void) {
 void editorDrawRows(struct abuf *ab) {
     int y;
     for (y = 0; y < E.screenrows; y++) {
-        // Write welcome message on first visible row
+        // Write welcome message one-third down the screen
         if (y == E.screenrows / 3) {
             char welcome[80];
             int welcomelen = snprintf(
@@ -238,8 +355,11 @@ void editorRefreshScreen(void) {
     // Draw rows of tildes
     editorDrawRows(&ab);
 
-    // Position cursor at top-left corner
-    abAppend(&ab, "\x1b[H", 3);
+    // Position cursor at coordinates stored in editor state E
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+    abAppend(&ab, buf, strlen(buf));
+
     // Show cursor
     abAppend(&ab, "\x1b[?25h", 6);
 
@@ -250,6 +370,10 @@ void editorRefreshScreen(void) {
 
 // Initialize the editor window
 void initEditor(void) {
+    // Position cursor at top-left corner
+    E.cx = 0;
+    E.cy = 0;
+
     // Get window size, or exit on failure
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
         die("getWindowSize");
