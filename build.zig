@@ -4,12 +4,42 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    //
+    // C executable
+    //
     const exe = b.addExecutable(.{
-        .name = "zkilo",
-        .root_source_file = b.path("src/main.zig"),
+        .name = "kilo",
+        // .root_source_file = b.path("src/main.c"),
         .target = target,
         .optimize = optimize,
     });
+    exe.linkLibC();
+
+    // Add files
+    const exe_files = [_][]const u8{
+        "src/kilo.c",
+    };
+    // Set flags
+    const exe_flags = [_][]const u8{
+        "-std=99",
+        "-g",
+        "-O0",
+        "-Werror",
+        "-Wall",
+        "-Wextra",
+        "-pedantic",
+    };
+
+    // Link libcpp to build a C++ app
+    exe.linkLibC();
+    // exe.linkSystemLibrary("sndfile");
+    exe.addCSourceFiles(.{
+        .files = &exe_files,
+        .flags = &exe_flags,
+    });
+    exe.addIncludePath(b.path("include"));
+
+    b.installArtifact(exe);
 
     b.installArtifact(exe);
 
