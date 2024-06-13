@@ -21,7 +21,8 @@ pub fn build(b: *std.Build) void {
     };
     // Set flags
     const exe_flags = [_][]const u8{
-        "-std=99",
+        "-fdiagnostics-color=always",
+        "-std=c99",
         "-g",
         "-O0",
         "-Werror",
