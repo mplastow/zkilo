@@ -18,6 +18,7 @@
 /*** defines ***/
 
 #define KILO_VERSION "0.0.1"
+#define KILO_TAB_STOP 8
 
 // bitwise AND Ctrl-key with a given character
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -39,12 +40,15 @@ enum editorKey {
 // Data type for storing a row of text
 typedef struct erow {
     int size;
+    int rsize;
     char* chars;
+    char* render;
 } erow;
 
 struct editorConfig {
     int cx, cy;
     int rowoff;
+    int coloff;
     int screenrows;
     int screencols;
 
@@ -221,6 +225,37 @@ int getWindowSize(int* rows, int* cols) {
 
 /*** row operations ***/
 
+// Updates contents of the current row
+void editorUpdateRow(erow* row) {
+    int tabs = 0;
+    int j;
+    // Get count of tabs (to account for extra memory needed when rendering them)
+    for (j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            tabs++;
+        }
+    }
+
+    free(row->render);
+    row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
+
+    int idx = 0;
+    // Render tabs with proper spacing
+    for (j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            row->render[idx++] = ' ';
+            while (idx % KILO_TAB_STOP != 0) {
+                row->render[idx++] = ' ';
+            }
+        } else {
+            row->render[idx++] = row->chars[j];
+        }
+    }
+
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
 void editorAppendRow(char* s, size_t len) {
     // Reallocate memory for the current row
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
@@ -231,6 +266,13 @@ void editorAppendRow(char* s, size_t len) {
     E.row[at].chars = malloc(len + 1);
     memcpy(E.row[at].chars, s, len);
     E.row[at].chars[len] = '\0';
+
+    E.row[at].rsize = 0;
+    E.row[at].render = NULL;
+
+    // Update contents of the current row
+    editorUpdateRow(&E.row[at]);
+
     E.numrows++;
 }
 
@@ -294,16 +336,29 @@ void abFree(struct abuf* ab) {
 
 // Move cursor using WASD
 void editorMoveCursor(int key) {
+    // Get current row to do horizontal scrolling checks
+    erow* row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+
     switch (key) {
         case ARROW_LEFT: {
             if (E.cx != 0) {
                 E.cx--;
+            } else if (E.cy > 0) {
+                // Moving left at the start of a line moves to the previous line
+                // and places the cursor all the way to the right
+                E.cy--;
+                E.cx = E.row[E.cy].size;
             }
             break;
         }
         case ARROW_RIGHT: {
-            if (E.cx != E.screencols - 1) {
+            if (row && E.cx < row->size) {
                 E.cx++;
+            } else if (row && E.cx == row->size) {
+                // Moving right at the end of a line moves to the next line
+                // and places the cursor all the way to the left
+                E.cy++;
+                E.cx = 0;
             }
             break;
         }
@@ -319,6 +374,13 @@ void editorMoveCursor(int key) {
             }
             break;
         }
+    }
+
+    // Snaps the cursor to the end of the line (cursor will not move into whitespace)
+    row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    int rowlen = row ? row->size : 0;
+    if (E.cx > rowlen) {
+        E.cx = rowlen;
     }
 }
 
@@ -365,6 +427,7 @@ void editorProcessKeypress(void) {
 /*** output ***/
 
 void editorScroll(void) {
+    // Vertical scrolling
     // Scrolls to cursor if above visible window
     if (E.cy < E.rowoff) {
         E.rowoff = E.cy;
@@ -372,6 +435,16 @@ void editorScroll(void) {
     // Scrolls to cursor if below visible window
     if (E.cy >= E.rowoff + E.screenrows) {
         E.rowoff = E.cy - E.screenrows + 1;
+    }
+
+    // Horizontal scrolling
+    // Scrolls past left edge of screen
+    if (E.cx < E.coloff) {
+        E.coloff = E.cx;
+    }
+    // Scrolls past right edge of screen
+    if (E.cx >= E.coloff + E.screencols) {
+        E.coloff = E.cx - E.screencols + 1;
     }
 }
 
@@ -411,11 +484,14 @@ void editorDrawRows(struct abuf *ab) {
             }
         } else {
             // Display contents of current row
-            int len = E.row[filerow].size;
+            int len = E.row[filerow].rsize - E.coloff;
+            if (len < 0) {
+                len = 0;
+            }
             if (len > E.screencols) {
                 len = E.screencols;
             }
-            abAppend(ab, E.row[filerow].chars, len);
+            abAppend(ab, &E.row[filerow].render[E.coloff], len);
         }
 
         // Clear each line before redraw
@@ -443,7 +519,8 @@ void editorRefreshScreen(void) {
 
     // Position cursor at coordinates stored in editor state E
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
+            (E.cy - E.rowoff) + 1, (E.cx - E.coloff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     // Show cursor
@@ -460,6 +537,7 @@ void initEditor(void) {
     E.cx = 0;
     E.cy = 0;
     E.rowoff = 0;
+    E.coloff = 0;
     E.numrows = 0;
     E.row = NULL;
 
