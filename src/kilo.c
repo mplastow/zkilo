@@ -1,10 +1,17 @@
 /*** includes ***/
+
+// Feature test macro
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -27,12 +34,23 @@ enum editorKey {
     PAGE_DOWN
 };
 
-
 /*** data ***/
+
+// Data type for storing a row of text
+typedef struct erow {
+    int size;
+    char* chars;
+} erow;
+
 struct editorConfig {
     int cx, cy;
+    int rowoff;
     int screenrows;
     int screencols;
+
+    int numrows;
+    erow* row;  // array of rows in editable text
+
     struct termios orig_termios;
 };
 
@@ -93,7 +111,7 @@ void enableRawMode(void) {
 
 // Return keypresses from the terminal
 int editorReadKey(void) {
-    int nread = 1;
+    int nread = 0;
     char c;
 
     // Run until keypress is detected, then read it to c
@@ -201,6 +219,48 @@ int getWindowSize(int* rows, int* cols) {
     }
 }
 
+/*** row operations ***/
+
+void editorAppendRow(char* s, size_t len) {
+    // Reallocate memory for the current row
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+
+    // Copy the current row char* to the current row in allocated memory
+    int at = E.numrows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(len + 1);
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.numrows++;
+}
+
+/*** file i/o ***/
+
+void editorOpen(char *filename) {
+    // Open specified file, or exit on failure
+    FILE *fp = fopen(filename, "r");
+    if (!fp ) {
+        die("fopen");
+    }
+
+    char* line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    // Read each line from the file
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+        while ( linelen > 0 && (line[linelen - 1] == '\n' ||
+                                line[linelen - 1] == '\r')) {
+            linelen--;
+        }
+        // Append row to screen
+        editorAppendRow(line, linelen);
+    }
+
+    // Free memory and close file
+    free(line);
+    fclose(fp);
+}
+
 /*** append buffer ***/
 
 // Append buffer allows update of entire screen at once each refresh
@@ -254,7 +314,7 @@ void editorMoveCursor(int key) {
             break;
         }
         case ARROW_DOWN: {
-            if (E.cy != E.screenrows - 1) {
+            if (E.cy < E.numrows) {
                 E.cy++;
             }
             break;
@@ -304,34 +364,58 @@ void editorProcessKeypress(void) {
 
 /*** output ***/
 
+void editorScroll(void) {
+    // Scrolls to cursor if above visible window
+    if (E.cy < E.rowoff) {
+        E.rowoff = E.cy;
+    }
+    // Scrolls to cursor if below visible window
+    if (E.cy >= E.rowoff + E.screenrows) {
+        E.rowoff = E.cy - E.screenrows + 1;
+    }
+}
+
+// Draw all rows
 void editorDrawRows(struct abuf *ab) {
     int y;
     for (y = 0; y < E.screenrows; y++) {
-        // Write welcome message one-third down the screen
-        if (y == E.screenrows / 3) {
-            char welcome[80];
-            int welcomelen = snprintf(
-                welcome, sizeof(welcome),
-                "Kilo editor -- version %s", KILO_VERSION
-            );
+        int filerow = y + E.rowoff;
+        // Check whether the current row is part of the text buffer,
+        // or whether it is a row after the end of the text buffer
+        if (filerow >= E.numrows) {
+            // Write a welcome message if the text buffer is empty
+            if (E.numrows == 0 && y == E.screenrows / 3) {
+                char welcome[80];
+                int welcomelen = snprintf(
+                    welcome, sizeof(welcome),
+                    "Kilo editor -- version %s", KILO_VERSION
+                );
 
-            if (welcomelen > E.screencols) {
-                welcomelen = E.screencols;
-            }
+                if (welcomelen > E.screencols) {
+                    welcomelen = E.screencols;
+                }
 
-            // Center the welcome message
-            int padding = (E.screencols - welcomelen) / 2;
-            if (padding) {
+                // Center the welcome message
+                int padding = (E.screencols - welcomelen) / 2;
+                if (padding) {
+                    abAppend(ab, "~", 1);
+                    padding--;
+                }
+                while(padding--) {
+                    abAppend( ab, " ", 1);
+                }
+
+                abAppend(ab, welcome, welcomelen);
+            } else {
                 abAppend(ab, "~", 1);
-                padding--;
             }
-            while(padding--) {
-                abAppend( ab, " ", 1);
-            }
-
-            abAppend(ab, welcome, welcomelen);
         } else {
-            abAppend(ab, "~", 1);
+            // Display contents of current row
+            int len = E.row[filerow].size;
+            if (len > E.screencols) {
+                len = E.screencols;
+            }
+            abAppend(ab, E.row[filerow].chars, len);
         }
 
         // Clear each line before redraw
@@ -343,8 +427,10 @@ void editorDrawRows(struct abuf *ab) {
     }
 }
 
-// Clear the screen
+// Clear the screen and draw all rows
 void editorRefreshScreen(void) {
+    editorScroll();
+
     struct abuf ab = ABUF_INIT;
 
     // Hide cursor
@@ -357,7 +443,7 @@ void editorRefreshScreen(void) {
 
     // Position cursor at coordinates stored in editor state E
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, E.cx + 1);
     abAppend(&ab, buf, strlen(buf));
 
     // Show cursor
@@ -373,6 +459,9 @@ void initEditor(void) {
     // Position cursor at top-left corner
     E.cx = 0;
     E.cy = 0;
+    E.rowoff = 0;
+    E.numrows = 0;
+    E.row = NULL;
 
     // Get window size, or exit on failure
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
@@ -381,10 +470,15 @@ void initEditor(void) {
 }
 
 /*** init ***/
-int main(void) {
+int main(int argc, char* argv[]) {
 
     enableRawMode();
     initEditor();
+
+    // Open file if specified
+    if (argc >= 2) {
+        editorOpen(argv[1]);
+    }
 
     while (1) {
         editorRefreshScreen();
