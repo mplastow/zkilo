@@ -76,6 +76,8 @@ struct editorConfig E;
 /*** prototypes ***/
 
 void editorSetStatusMessage(const char* fmt, ...);
+void editorRefreshScreen(void);
+char* editorPrompt(char* prompt);
 
 /*** terminal ***/
 
@@ -290,12 +292,18 @@ void editorUpdateRow(erow* row) {
 }
 
 // Append a row to the current array of rows
-void editorAppendRow(char* s, size_t len) {
+void editorInsertRow(int at, char* s, size_t len) {
+    // Check bounds
+    if (at < 0 || at > E.numrows) {
+        return;
+    }
+
     // Reallocate memory for the current row
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+    // Move current row to next row index
+    memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
 
     // Copy the current row char* to the current row in allocated memory
-    int at = E.numrows;
     E.row[at].size = len;
     E.row[at].chars = malloc(len + 1);
     memcpy(E.row[at].chars, s, len);
@@ -308,6 +316,25 @@ void editorAppendRow(char* s, size_t len) {
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
+    E.dirty++;
+}
+
+// Free memory for a row
+void editorFreeRow(erow* row) {
+    free(row->render);
+    free(row->chars);
+}
+
+void editorDelRow(int at) {
+    // Check bounds
+    if (at < 0 || at >= E.numrows) {
+        return;
+    }
+    // Delete row
+    editorFreeRow(&E.row[at]);
+    // Move memory for rows after deleted row
+    memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+    E.numrows--;
     E.dirty++;
 }
 
@@ -327,16 +354,84 @@ void editorRowInsertChar(erow* row, int at, int c) {
     E.dirty++;
 }
 
+// Append a string of any size to the end of a row
+void editorRowAppendString(erow* row, char* s, size_t len) {
+    // Reallocate memory for new size of row
+    row->chars = realloc(row->chars, row->size + len + 1);
+    // Copy memory of string into row
+    memcpy(&row->chars[row->size], s, len);
+    row->size += len;
+    // Append null terminator
+    row->chars[row->size] = '\0';
+    editorUpdateRow(row);
+    E.dirty++;
+}
+
+// Delete a character from a row at an index
+void editorRowDelChar(erow* row, int at) {
+    if (at < 0 || at >= row->size) {
+        return;
+    }
+    // Move row contents before and after character
+    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+    // Shrink row size and update row
+    row->size--;
+    editorUpdateRow(row);
+    E.dirty++;
+}
+
 /*** editor operations ***/
 
 void editorInsertChar(int c) {
     // Add new row to end of file when needed
     if (E.cy == E.numrows) {
-        editorAppendRow("", 0);
+        editorInsertRow(E.numrows, "", 0);
     }
     // Insert character and move cursor to right of character
     editorRowInsertChar(&E.row[E.cy], E.cx, c);
     E.cx++;
+}
+
+// Insert a new line (e.g. with Enter key)
+void editorInsertNewLine(void) {
+    // Insert new blank row before current line if at beginning of line
+    if (E.cx == 0) {
+        editorInsertRow(E.cy, "", 0);
+    } else {
+        // Split the current line into two rows
+        erow* row = &E.row[E.cy];
+        editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
+        // Update pointer to avoid invalidation
+        row = &E.row[E.cy];
+        row->size = E.cx;
+        row->chars[row->size] = '\0';
+        editorUpdateRow(row);
+    }
+    E.cy++;
+    E.cx = 0;
+}
+
+void editorDelChar(void) {
+    // Return if cursor is beyond the last line
+    if (E.cy == E.numrows) {
+        return;
+    }
+    // Return if cursor is at the beginning of the first line
+    if (E.cx == 0 && E.cy == 0) {
+        return;
+    }
+
+    erow* row = &E.row[E.cy];
+    if (E.cx > 0) {
+        editorRowDelChar(row, E.cx - 1);
+        E.cx--;
+    } else {
+        // Handle case where cursor is at beginning of line
+        E.cx = E.row[E.cy - 1].size;
+        editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+        editorDelRow(E.cy);
+        E.cy--;
+    }
 }
 
 /*** file i/o ***/
@@ -363,7 +458,7 @@ void editorOpen(char *filename) {
             linelen--;
         }
         // Append row to screen
-        editorAppendRow(line, linelen);
+        editorInsertRow(E.numrows, line, linelen);
     }
 
     // Free memory and close file
@@ -398,7 +493,11 @@ char* editorRowsToString(int* buflen) {
 
 void editorSave(void) {
     if (E.filename == NULL) {
-        return;
+        E.filename = editorPrompt("Save as: %s (ESC to cancel)");
+        if (E.filename == NULL) {
+            editorSetStatusMessage("Save aborted");
+            return;
+        }
     }
 
     // Serialize all rows to a single string
@@ -459,6 +558,43 @@ void abFree(struct abuf* ab) {
 
 /*** input ***/
 
+// Prompt user to input a file name when saving, using status bar
+char* editorPrompt(char* prompt) {
+    size_t bufsize = 128;
+    char* buf = malloc(bufsize);
+
+    size_t buflen = 0;
+    buf[0] = '\0';
+
+    while (1) {
+        editorSetStatusMessage(prompt, buf);
+        editorRefreshScreen();
+
+        int c = editorReadKey();
+        if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+            if (buflen != 0) {
+                buf[--buflen] = '\0';
+            }
+        } else if (c == '\x1b') {
+            editorSetStatusMessage("");
+            free(buf);
+            return NULL;
+        } else if (c == '\r') {
+            if (buflen != 0 ) {
+                editorSetStatusMessage("");
+                return buf;
+            }
+        } else if (!iscntrl(c) && c < 128) {
+            if (buflen == bufsize - 1) {
+                bufsize *= 2;
+                buf = realloc(buf, bufsize);
+            }
+            buf[buflen++] = c;
+            buf[buflen] = '\0';
+        }
+    }
+}
+
 // Move cursor using WASD
 void editorMoveCursor(int key) {
     // Get current row to do horizontal scrolling checks
@@ -518,7 +654,7 @@ void editorProcessKeypress(void) {
     switch (c) {
         // Enter key (carriage return symbol)
         case '\r': {
-            /* TODO */
+            editorInsertNewLine();
             break;
         }
 
@@ -532,7 +668,7 @@ void editorProcessKeypress(void) {
                 quit_times--;
                 return;
             }
-            
+
             // Clear screen (see editorProcessKeypress()) and exit code 0
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
@@ -556,15 +692,12 @@ void editorProcessKeypress(void) {
             break;
         }
 
-        case BACKSPACE: {
-
-        }
-        // Alternate key combination for backspace
-        case CTRL_KEY('h'): {
-
-        }
-        case DEL_KEY: {
-            /* TODO */
+        case BACKSPACE: case CTRL_KEY('h'): case DEL_KEY: {
+            // Move cursor to the right first if delete key is pressed
+            if (c == DEL_KEY) {
+                editorMoveCursor(ARROW_RIGHT);
+            }
+            editorDelChar();
             break;
         }
 
