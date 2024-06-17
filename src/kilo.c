@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -26,6 +27,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey {
+    BACKSPACE = 127,
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -280,6 +282,7 @@ void editorUpdateRow(erow* row) {
     row->rsize = idx;
 }
 
+// Append a row to the current array of rows
 void editorAppendRow(char* s, size_t len) {
     // Reallocate memory for the current row
     E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
@@ -300,8 +303,36 @@ void editorAppendRow(char* s, size_t len) {
     E.numrows++;
 }
 
+// Insert a character into a row at an index
+void editorRowInsertChar(erow* row, int at, int c) {
+    if (at < 0 || at > row->size) {
+        at = row->size;
+    }
+    // Reallocate memory and move characters before and after inserted character
+    row->chars = realloc(row->chars, row->size + 2);
+    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+    row->size++;
+    // Insert character
+    row->chars[at] = c;
+    // Update the row in the editor
+    editorUpdateRow(row);
+}
+
+/*** editor operations ***/
+
+void editorInsertChar(int c) {
+    // Add new row to end of file when needed
+    if (E.cy == E.numrows) {
+        editorAppendRow("", 0);
+    }
+    // Insert character and move cursor to right of character
+    editorRowInsertChar(&E.row[E.cy], E.cx, c);
+    E.cx++;
+}
+
 /*** file i/o ***/
 
+// Open a file
 void editorOpen(char *filename) {
     // Get filename to display in status bar
     free(E.filename);
@@ -329,6 +360,52 @@ void editorOpen(char *filename) {
     // Free memory and close file
     free(line);
     fclose(fp);
+}
+
+// Serialize all rows to a single string
+char* editorRowsToString(int* buflen) {
+    int totlen = 0;
+    int j;
+    // Add the length of each row to the total length
+    for (j = 0; j < E.numrows; j++) {
+        totlen += E.row[j].size + 1;
+    }
+    *buflen = totlen;
+
+    // Allocate a buffer for the total length of the document
+    char* buf = malloc(totlen);
+    char* p = buf;
+    // Copy all rows into the buffer, using a pointer to track write location
+    for (j = 0; j < E.numrows; j++) {
+        memcpy(p, E.row[j].chars, E.row[j].size);
+        p += E.row[j].size;
+        *p = '\n';
+        p++;
+    }
+
+    return buf;
+}
+
+void editorSave(void) {
+    if (E.filename == NULL) {
+        return;
+    }
+
+    // Serialize all rows to a single string
+    int len;
+    char* buf = editorRowsToString(&len);
+
+    // Create a new file if it doesn't exist
+    // and open it with standard read/write permissions
+    int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+    // Set file size safely in case write fails
+    ftruncate(fd, len);
+    // Write serialization buffer to file
+    write(fd, buf, len);
+
+    // Close file and free buffer
+    close(fd);
+    free(buf);
 }
 
 /*** append buffer ***/
@@ -416,13 +493,24 @@ void editorMoveCursor(int key) {
 void editorProcessKeypress(void) {
     int c = editorReadKey();
 
-    // Exit on 'ctrl-q'
     switch (c) {
+        // Enter key (carriage return symbol)
+        case '\r': {
+            /* TODO */
+            break;
+        }
+
+        // Exit on 'ctrl-q'
         case CTRL_KEY('q'): {
         // Clear screen (see editorProcessKeypress()) and exit code 0
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
+            break;
+        }
+
+        case CTRL_KEY('s'): {
+            editorSave();
             break;
         }
 
@@ -437,6 +525,18 @@ void editorProcessKeypress(void) {
             break;
         }
 
+        case BACKSPACE: {
+
+        }
+        // Alternate key combination for backspace
+        case CTRL_KEY('h'): {
+
+        }
+        case DEL_KEY: {
+            /* TODO */
+            break;
+        }
+
         // Move using page up and page down
         case PAGE_UP: case PAGE_DOWN: {
             // Position cursor at either top or bottom of screen
@@ -448,8 +548,6 @@ void editorProcessKeypress(void) {
                     E.cy = E.numrows;
                 }
             }
-
-            
             // Simulate an entire screen's worth of up/down keypresses
             int times = E.screenrows;
             while (times--) {
@@ -461,6 +559,21 @@ void editorProcessKeypress(void) {
         // Move cursor using arrow keys
         case ARROW_LEFT: case ARROW_RIGHT: case ARROW_UP: case ARROW_DOWN: {
             editorMoveCursor(c);
+            break;
+        }
+        
+        // Screen refresh
+        case CTRL_KEY('l') : {
+
+        }
+        // Escape key (and other escape sequences)
+        case '\x1b': {
+            break;
+        }
+
+        // Insert the character corresponding to the key at the current cursor location
+        default: {
+            editorInsertChar(c);
             break;
         }
     }
