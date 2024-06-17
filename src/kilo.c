@@ -22,6 +22,7 @@
 
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
+#define KILO_QUIT_TIMES 3
 
 // bitwise AND Ctrl-key with a given character
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -59,7 +60,9 @@ struct editorConfig {
 
     int numrows;            // Number of rows in the file
     erow* row;              // Array of rows of text
+
     char* filename;         // Name of open file
+    int dirty;              // Dirty bit: has file been edited?
 
     char statusmsg[80];     // Status bar message string
     time_t statusmsg_time;  // Current time
@@ -69,6 +72,10 @@ struct editorConfig {
 
 // Global container for editor state
 struct editorConfig E;
+
+/*** prototypes ***/
+
+void editorSetStatusMessage(const char* fmt, ...);
 
 /*** terminal ***/
 
@@ -301,6 +308,7 @@ void editorAppendRow(char* s, size_t len) {
     editorUpdateRow(&E.row[at]);
 
     E.numrows++;
+    E.dirty++;
 }
 
 // Insert a character into a row at an index
@@ -316,6 +324,7 @@ void editorRowInsertChar(erow* row, int at, int c) {
     row->chars[at] = c;
     // Update the row in the editor
     editorUpdateRow(row);
+    E.dirty++;
 }
 
 /*** editor operations ***/
@@ -360,6 +369,7 @@ void editorOpen(char *filename) {
     // Free memory and close file
     free(line);
     fclose(fp);
+    E.dirty = 0;
 }
 
 // Serialize all rows to a single string
@@ -398,14 +408,24 @@ void editorSave(void) {
     // Create a new file if it doesn't exist
     // and open it with standard read/write permissions
     int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
-    // Set file size safely in case write fails
-    ftruncate(fd, len);
-    // Write serialization buffer to file
-    write(fd, buf, len);
-
-    // Close file and free buffer
-    close(fd);
+    if (fd != -1) {
+        // Set file size safely in case write fails
+        if (ftruncate(fd, len) != -1) {
+            // Write serialization buffer to file
+            if (write(fd, buf, len) == len) {
+                // Close file and free writeout buffer
+                close(fd);
+                free(buf);
+                E.dirty = 0;
+                editorSetStatusMessage("%d bytes written to disk", len);
+                return;
+            }
+        }
+        close(fd);
+    }
+    // Free writeout buffer
     free(buf);
+    editorSetStatusMessage("Could not save file! Error: %s", strerror(errno));
 }
 
 /*** append buffer ***/
@@ -491,6 +511,8 @@ void editorMoveCursor(int key) {
 
 // Handle keypresses
 void editorProcessKeypress(void) {
+    static int quit_times = KILO_QUIT_TIMES;
+
     int c = editorReadKey();
 
     switch (c) {
@@ -502,7 +524,16 @@ void editorProcessKeypress(void) {
 
         // Exit on 'ctrl-q'
         case CTRL_KEY('q'): {
-        // Clear screen (see editorProcessKeypress()) and exit code 0
+            // Check if program has been modified after last save.
+            // If so, require user to input several "quit" commands before exiting
+            if (E.dirty && quit_times > 0) {
+                editorSetStatusMessage("Warning! File has unsaved changes. "
+                "Press Ctrl-Q %d more times to quit.", quit_times);
+                quit_times--;
+                return;
+            }
+            
+            // Clear screen (see editorProcessKeypress()) and exit code 0
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
@@ -577,6 +608,8 @@ void editorProcessKeypress(void) {
             break;
         }
     }
+
+    quit_times = KILO_QUIT_TIMES;
 }
 
 /*** output ***/
@@ -665,9 +698,13 @@ void editorDrawRows(struct abuf *ab) {
 void editorDrawStatusBar(struct abuf *ab) {
     abAppend(ab, "\x1b[7m", 4);
     char status[80], rstatus[80];
-    // Print first 20 characters of filename and number of rows
-    int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-        E.filename ? E.filename : "[No name]", E.numrows);
+    // Print status bar content on left side of screen
+    int len = snprintf(
+        // Print first 20 characters of filename and number of rows
+        status, sizeof(status), "%.20s - %d lines %s",
+        E.filename ? E.filename : "[No Name]", E.numrows,
+        // Print indicator if file has been modified
+        E.dirty ? "(modified)" : "");
     // Print current line number on right side of screen
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy + 1, E.numrows);
     // Cap length at the number of columns on screen
@@ -760,6 +797,7 @@ void initEditor(void) {
     E.row = NULL;
 
     E.filename = NULL;
+    E.dirty = 0;
 
     E.statusmsg[0] = '\0';
     E.statusmsg_time = 0;
@@ -784,7 +822,7 @@ int main(int argc, char* argv[]) {
         editorOpen(argv[1]);
     }
 
-    editorSetStatusMessage("HELP: Ctrl-Q = quit");
+    editorSetStatusMessage("HELP: Ctrl-S = save |Ctrl-Q = quit");
 
     while (1) {
         editorRefreshScreen();
