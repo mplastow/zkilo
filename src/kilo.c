@@ -23,6 +23,7 @@
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
 #define KILO_QUIT_TIMES 3
+#define KILO_UNDO_STATES 8  // Keep this a power of two
 
 // bitwise AND Ctrl-key with a given character
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -51,6 +52,11 @@ enum editorHighlight {
     HL_MATCH
 };
 
+enum editorUndoCommand {
+    UNDO_INSERT = 0,    // Undoes an insertion
+    UNDO_DELETE         // Undoes a deletion
+};
+
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
 #define HL_HIGHLIGHT_STRINGS (1<<1)
 
@@ -77,6 +83,24 @@ typedef struct erow {
     int hl_open_comment;
 } erow;
 
+// Data type for storing an undo operations
+typedef struct eundo {
+    int row;        // row number from erow* row
+    int cx;         // col number
+    int command;    // see enum editorUndoCommand
+    char c;         // used only for UNDO_DELETE: which character must be inserted
+} eundo;
+
+// Ring buffer of undo operations
+typedef struct editorUndoBuffer {
+    eundo buf[KILO_UNDO_STATES];   // TODO: is this a stack allocated array?
+    eundo* bufend; // Don't go past tail of buffer
+    int undocount;  // Number of undo operations in buffer
+    eundo* head;    // Current head of buffer
+    eundo* tail;  // Pointer to latest undo operation  
+    
+} editorUndoBuffer;
+
 struct editorConfig {
     int cx, cy;             // Absolute cursor x and y position
     int rx;                 // Rendered cursor x position, to account for tabs
@@ -95,6 +119,8 @@ struct editorConfig {
     time_t statusmsg_time;  // Current time
 
     struct editorSyntax* syntax;    // Syntax highlighting rules
+
+    editorUndoBuffer* undobuffer;        // Ring buffer of undo states
 
     struct termios orig_termios;    // Settings to be restored after exiting raw mode
 };
@@ -130,6 +156,7 @@ struct editorSyntax HLDB[] = {
 void editorSetStatusMessage(const char* fmt, ...);
 void editorRefreshScreen(void);
 char* editorPrompt(char* prompt, void(*callback)(char*, int));
+void editorDoUndo();
 
 /*** terminal ***/
 
@@ -1052,6 +1079,11 @@ void editorProcessKeypress(void) {
             break;
         }
 
+        case CTRL_KEY('z'): {
+            editorDoUndo();
+            break;
+        }
+
         case HOME_KEY: {
             E.cx = 0;
             break;
@@ -1119,6 +1151,76 @@ void editorProcessKeypress(void) {
     }
 
     quit_times = KILO_QUIT_TIMES;
+}
+
+
+/*** undo ***/
+
+// Create an undo operation to append to buffer
+eundo editorCreateUndo(int row, int cx, char c, int command) {
+
+}
+
+// Drop oldest undo operation in the buffer
+void editorDropOldestUndo() {
+    // Nothing to drop if the buffer is empty
+    if (E.undobuffer->undocount == 0) {
+        return;
+    }
+    // Shift head to the right
+    E.undobuffer->head = E.undobuffer->head + sizeof(eundo);
+    // If head is end of the buffer, wrap around to front of buffer
+    if (E.undobuffer->head == E.undobuffer->bufend) {
+        E.undobuffer->head = E.undobuffer->buf;
+    }
+}
+
+// Add a new undo operation to the buffer
+void editorAppendUndo(eundo undo) {
+    // If buffer is full, drop oldest item
+    if (E.undobuffer->undocount == KILO_UNDO_STATES) {
+        editorDropOldestUndo();
+    }
+    
+    // Append item at tail
+    memcpy(E.undobuffer->tail, &undo, sizeof(eundo));
+    // Shift tail to the right
+    E.undobuffer->tail = E.undobuffer->tail + sizeof(eundo);
+    // If tail is end of the buffer, wrap around to front of buffer
+    if (E.undobuffer->tail == E.undobuffer->bufend) {
+        E.undobuffer->tail = E.undobuffer->buf;
+    }
+    // Increment count of items in buffer
+    E.undobuffer->undocount++;
+}
+
+void editorDoUndo() {
+    // Do nothing if the buffer is empty
+    if (E.undobuffer->undocount == 0) {
+        return;
+    }
+
+    eundo latest;
+    // Copy the latest state (tail points AFTER latest state)
+    memcpy(&latest, E.undobuffer->tail - sizeof(eundo), sizeof(eundo));
+
+    // Handle undoing a deletion by inserting the deleted character
+    if (latest.command == UNDO_DELETE) {
+        editorRowInsertChar(latest.row, latest.cx, latest.c);
+    }
+    // Handle undoing an insertion by deleting the inserted character
+    else {
+        editorRowDelChar(latest.row, latest.cx);
+    }
+
+    // Decrement number of undo operations in the buffer
+    E.undobuffer->undocount--;
+    // Shift tail to left
+    E.undobuffer->tail = E.undobuffer->tail - sizeof(eundo);
+    // If tail is at front of buffer, wrap around to end of buffer
+    if (E.undobuffer->tail == E.undobuffer->buf) {
+        E.undobuffer->tail = E.undobuffer->bufend - sizeof(eundo);
+    }
 }
 
 /*** output ***/
@@ -1352,6 +1454,13 @@ void initEditor(void) {
     E.statusmsg_time = 0;
 
     E.syntax = NULL;
+
+    E.undobuffer = (editorUndoBuffer *)calloc(1, sizeof(editorUndoBuffer));
+    E.undobuffer->bufend = E.undobuffer->buf + (KILO_UNDO_STATES * sizeof(eundo));
+    E.undobuffer->undocount = 0;
+    E.undobuffer->head = E.undobuffer->buf;
+    E.undobuffer->tail = E.undobuffer->buf;
+    
 
     // Get window size, or exit on failure
     if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
