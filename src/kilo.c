@@ -156,7 +156,9 @@ struct editorSyntax HLDB[] = {
 void editorSetStatusMessage(const char* fmt, ...);
 void editorRefreshScreen(void);
 char* editorPrompt(char* prompt, void(*callback)(char*, int));
-void editorDoUndo();
+void editorAppendUndo(eundo undo);
+eundo editorCreateUndo(int row, int cx, int c, int command);
+void editorDoUndo(void);
 
 /*** terminal ***/
 
@@ -486,7 +488,7 @@ void editorSelectSyntaxHighlight(void) {
         return;
     }
 
-    char *ext = strrchr(E.filename, '.');
+    char* ext = strrchr(E.filename, '.');
 
     for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
         struct editorSyntax* s = &HLDB[j];
@@ -689,6 +691,11 @@ void editorInsertChar(int c) {
     if (E.cy == E.numrows) {
         editorInsertRow(E.numrows, "", 0);
     }
+
+    // Append UNDO_INSERT to undo buffer
+    eundo undoinsert = editorCreateUndo(E.cy, E.cx, c, UNDO_INSERT);
+    editorAppendUndo(undoinsert);
+
     // Insert character and move cursor to right of character
     editorRowInsertChar(&E.row[E.cy], E.cx, c);
     E.cx++;
@@ -724,6 +731,10 @@ void editorDelChar(void) {
         return;
     }
 
+    // Append UNDO_DELETE to undo buffer
+    eundo undoinsert = editorCreateUndo(E.cy, E.cx, 0, UNDO_DELETE);
+    editorAppendUndo(undoinsert);
+
     erow* row = &E.row[E.cy];
     if (E.cx > 0) {
         editorRowDelChar(row, E.cx - 1);
@@ -740,7 +751,7 @@ void editorDelChar(void) {
 /*** file i/o ***/
 
 // Open a file
-void editorOpen(char *filename) {
+void editorOpen(char* filename) {
     // Get filename to display in status bar
     free(E.filename);
     E.filename = strdup(filename);
@@ -919,7 +930,7 @@ void editorFind(void) {
 
 // Append buffer allows update of entire screen at once each refresh
 struct abuf {
-    char *b;    // pointer to buffer
+    char* b;    // pointer to buffer
     int len;    // length of buffer
 };
 
@@ -929,7 +940,7 @@ struct abuf {
 // Append a string to an append buffer
 // Uses same interface as write(), except writes to the buffer rather than to stdout
 void abAppend(struct abuf* ab, const char* s, int len) {
-    char *new  = realloc(ab->b, ab->len + len);
+    char* new  = realloc(ab->b, ab->len + len);
 
     if (new == NULL) {
         return;
@@ -1157,18 +1168,24 @@ void editorProcessKeypress(void) {
 /*** undo ***/
 
 // Create an undo operation to append to buffer
-eundo editorCreateUndo(int row, int cx, char c, int command) {
+eundo editorCreateUndo(int row, int cx, int c, int command) {
+    eundo newundo;
+    newundo.row = row;
+    newundo.cx = cx;
+    newundo.c = c;
+    newundo.command = command;
 
+    return newundo;
 }
 
 // Drop oldest undo operation in the buffer
-void editorDropOldestUndo() {
+void editorDropOldestUndo(void) {
     // Nothing to drop if the buffer is empty
     if (E.undobuffer->undocount == 0) {
         return;
     }
     // Shift head to the right
-    E.undobuffer->head = E.undobuffer->head + sizeof(eundo);
+    E.undobuffer->head = (eundo*)E.undobuffer->head + sizeof(eundo);
     // If head is end of the buffer, wrap around to front of buffer
     if (E.undobuffer->head == E.undobuffer->bufend) {
         E.undobuffer->head = E.undobuffer->buf;
@@ -1185,7 +1202,7 @@ void editorAppendUndo(eundo undo) {
     // Append item at tail
     memcpy(E.undobuffer->tail, &undo, sizeof(eundo));
     // Shift tail to the right
-    E.undobuffer->tail = E.undobuffer->tail + sizeof(eundo);
+    E.undobuffer->tail = (eundo*)E.undobuffer->tail + sizeof(eundo);
     // If tail is end of the buffer, wrap around to front of buffer
     if (E.undobuffer->tail == E.undobuffer->bufend) {
         E.undobuffer->tail = E.undobuffer->buf;
@@ -1194,7 +1211,7 @@ void editorAppendUndo(eundo undo) {
     E.undobuffer->undocount++;
 }
 
-void editorDoUndo() {
+void editorDoUndo(void) {
     // Do nothing if the buffer is empty
     if (E.undobuffer->undocount == 0) {
         return;
@@ -1202,24 +1219,24 @@ void editorDoUndo() {
 
     eundo latest;
     // Copy the latest state (tail points AFTER latest state)
-    memcpy(&latest, E.undobuffer->tail - sizeof(eundo), sizeof(eundo));
+    memcpy(&latest, (eundo*)E.undobuffer->tail - sizeof(eundo), sizeof(eundo));
 
     // Handle undoing a deletion by inserting the deleted character
     if (latest.command == UNDO_DELETE) {
-        editorRowInsertChar(latest.row, latest.cx, latest.c);
+        editorRowInsertChar(&E.row[latest.row], latest.cx, latest.c);
     }
     // Handle undoing an insertion by deleting the inserted character
     else {
-        editorRowDelChar(latest.row, latest.cx);
+        editorRowDelChar(&E.row[latest.row], latest.cx);
     }
 
     // Decrement number of undo operations in the buffer
     E.undobuffer->undocount--;
     // Shift tail to left
-    E.undobuffer->tail = E.undobuffer->tail - sizeof(eundo);
+    E.undobuffer->tail = (eundo*)E.undobuffer->tail - sizeof(eundo);
     // If tail is at front of buffer, wrap around to end of buffer
     if (E.undobuffer->tail == E.undobuffer->buf) {
-        E.undobuffer->tail = E.undobuffer->bufend - sizeof(eundo);
+        E.undobuffer->tail = (eundo*)E.undobuffer->bufend - sizeof(eundo);
     }
 }
 
@@ -1455,8 +1472,8 @@ void initEditor(void) {
 
     E.syntax = NULL;
 
-    E.undobuffer = (editorUndoBuffer *)calloc(1, sizeof(editorUndoBuffer));
-    E.undobuffer->bufend = E.undobuffer->buf + (KILO_UNDO_STATES * sizeof(eundo));
+    E.undobuffer = (editorUndoBuffer*)calloc(1, sizeof(editorUndoBuffer));
+    E.undobuffer->bufend = (eundo*)E.undobuffer->buf + (KILO_UNDO_STATES * sizeof(eundo));
     E.undobuffer->undocount = 0;
     E.undobuffer->head = E.undobuffer->buf;
     E.undobuffer->tail = E.undobuffer->buf;
