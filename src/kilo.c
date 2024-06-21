@@ -22,7 +22,7 @@
 
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
-#define KILO_QUIT_TIMES 3
+#define KILO_QUIT_TIMES 0
 #define KILO_UNDO_STATES 8  // Keep this a power of two
 
 // bitwise AND Ctrl-key with a given character
@@ -94,10 +94,11 @@ typedef struct eundo {
 // Ring buffer of undo operations
 typedef struct editorUndoBuffer {
     eundo buf[KILO_UNDO_STATES];   // TODO: is this a stack allocated array?
-    eundo* bufend; // Don't go past tail of buffer
-    int undocount;  // Number of undo operations in buffer
-    eundo* head;    // Current head of buffer
-    eundo* tail;  // Pointer to latest undo operation  
+    eundo* buffront;    // Front of memory allocation
+    eundo* bufback;     // Back of memory allocation
+    int undocount;      // Number of undo operations in buffer
+    eundo* head;        // Pointer to oldest valid undo operation
+    eundo* tail;        // Pointer to latest valid undo operation  
     
 } editorUndoBuffer;
 
@@ -1181,14 +1182,15 @@ eundo editorCreateUndo(int row, int cx, int c, int command) {
 
 // Drop oldest undo operation in the buffer
 void editorDropOldestUndo(void) {
-    // Nothing to drop if the buffer is empty
+    // Nothing to drop if the buffer is empty -- may be redundant
     if (E.undobuffer->undocount == 0) {
         return;
     }
+    
     // Shift head to the right
     E.undobuffer->head = (eundo*)E.undobuffer->head + sizeof(eundo);
-    // If head is end of the buffer, wrap around to front of buffer
-    if (E.undobuffer->head == E.undobuffer->bufend) {
+    // If head is now at back of the buffer, wrap around to front of buffer
+    if (E.undobuffer->head == E.undobuffer->bufback) {
         E.undobuffer->head = E.undobuffer->buf;
     }
     // Decrement undo count
@@ -1206,9 +1208,9 @@ void editorAppendUndo(eundo undo) {
     memcpy(E.undobuffer->tail, &undo, sizeof(eundo));
     // Shift tail to the right
     E.undobuffer->tail = (eundo*)E.undobuffer->tail + sizeof(eundo);
-    // If tail is end of the buffer, wrap around to front of buffer
-    if (E.undobuffer->tail == E.undobuffer->bufend) {
-        E.undobuffer->tail = E.undobuffer->buf;
+    // If tail is now at back of the buffer, wrap around to front of buffer
+    if (E.undobuffer->tail == E.undobuffer->bufback) {
+        E.undobuffer->tail = E.undobuffer->buffront;
     }
     // Increment count of items in buffer
     E.undobuffer->undocount++;
@@ -1218,6 +1220,11 @@ void editorDoUndo(void) {
     // Do nothing if the buffer is empty
     if (E.undobuffer->undocount == 0) {
         return;
+    }
+
+    // If at front of buffer, wrap around to buffer back
+    if (E.undobuffer->tail == E.undobuffer->buffront) {
+        E.undobuffer->tail = (eundo*)E.undobuffer->bufback;
     }
 
     eundo latest;
@@ -1240,10 +1247,6 @@ void editorDoUndo(void) {
     }
     // Shift tail to left
     E.undobuffer->tail = (eundo*)E.undobuffer->tail - sizeof(eundo);
-    // If tail is at front of buffer, wrap around to end of buffer
-    if (E.undobuffer->tail == E.undobuffer->buf) {
-        E.undobuffer->tail = (eundo*)E.undobuffer->bufend - sizeof(eundo);
-    }
 }
 
 /*** output ***/
@@ -1479,7 +1482,8 @@ void initEditor(void) {
     E.syntax = NULL;
 
     E.undobuffer = (editorUndoBuffer*)calloc(1, sizeof(editorUndoBuffer));
-    E.undobuffer->bufend = (eundo*)E.undobuffer->buf + (KILO_UNDO_STATES * sizeof(eundo));
+    E.undobuffer->buffront = E.undobuffer->buf;
+    E.undobuffer->bufback = (eundo*)E.undobuffer->buf + (KILO_UNDO_STATES * sizeof(eundo));
     E.undobuffer->undocount = 0;
     E.undobuffer->head = E.undobuffer->buf;
     E.undobuffer->tail = E.undobuffer->buf;
