@@ -333,7 +333,8 @@ void editorUpdateSyntax(erow* row) {
     // Reallocate memory to account for changes since last highlight pass
     row->hl = realloc(row->hl, row->rsize);
     // Set all characters to normal
-    memset(row->hl, HL_NORMAL, row->rsize);
+    if (row->rsize > 0)
+        memset(row->hl, HL_NORMAL, row->rsize);
 
     if (E.syntax == NULL) {
         return;
@@ -732,8 +733,8 @@ void editorDelChar(void) {
     }
 
     // Append UNDO_DELETE to undo buffer
-    eundo undoinsert = editorCreateUndo(E.cy, E.cx, 0, UNDO_DELETE);
-    editorAppendUndo(undoinsert);
+    // eundo undoinsert = editorCreateUndo(E.cy, E.cx, 0, UNDO_DELETE);
+    // editorAppendUndo(undoinsert);
 
     erow* row = &E.row[E.cy];
     if (E.cx > 0) {
@@ -1190,6 +1191,8 @@ void editorDropOldestUndo(void) {
     if (E.undobuffer->head == E.undobuffer->bufend) {
         E.undobuffer->head = E.undobuffer->buf;
     }
+    // Decrement undo count
+    E.undobuffer->undocount--;
 }
 
 // Add a new undo operation to the buffer
@@ -1222,16 +1225,19 @@ void editorDoUndo(void) {
     memcpy(&latest, (eundo*)E.undobuffer->tail - sizeof(eundo), sizeof(eundo));
 
     // Handle undoing a deletion by inserting the deleted character
-    if (latest.command == UNDO_DELETE) {
-        editorRowInsertChar(&E.row[latest.row], latest.cx, latest.c);
-    }
+    // if (latest.command == UNDO_DELETE) {
+    //     editorRowInsertChar(&E.row[latest.row], latest.cx, latest.c);
+    // }
     // Handle undoing an insertion by deleting the inserted character
-    else {
+    if (latest.command == UNDO_INSERT) {
         editorRowDelChar(&E.row[latest.row], latest.cx);
+        E.cx--;
     }
 
     // Decrement number of undo operations in the buffer
-    E.undobuffer->undocount--;
+    if (E.undobuffer->undocount > 0) {
+        E.undobuffer->undocount--;
+    }
     // Shift tail to left
     E.undobuffer->tail = (eundo*)E.undobuffer->tail - sizeof(eundo);
     // If tail is at front of buffer, wrap around to end of buffer
