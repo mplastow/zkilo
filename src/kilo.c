@@ -733,12 +733,16 @@ void editorDelChar(void) {
         return;
     }
 
-    // Append UNDO_DELETE to undo buffer
-    // eundo undoinsert = editorCreateUndo(E.cy, E.cx, 0, UNDO_DELETE);
-    // editorAppendUndo(undoinsert);
-
+    
     erow* row = &E.row[E.cy];
     if (E.cx > 0) {
+        // Copy the character to be deleted into c
+        char c = row->chars[E.cx - 1];
+        // Append UNDO_DELETE to undo buffer
+        eundo undodelete = editorCreateUndo(E.cy, E.cx - 1, (int)c, UNDO_DELETE);
+        editorAppendUndo(undodelete);
+
+        // Delete character from row
         editorRowDelChar(row, E.cx - 1);
         E.cx--;
     } else {
@@ -748,6 +752,8 @@ void editorDelChar(void) {
         editorDelRow(E.cy);
         E.cy--;
     }
+
+    
 }
 
 /*** file i/o ***/
@@ -1231,14 +1237,15 @@ void editorDoUndo(void) {
     // Copy the latest state (tail points AFTER latest state)
     memcpy(&latest, (eundo*)E.undobuffer->tail - sizeof(eundo), sizeof(eundo));
 
-    // Handle undoing a deletion by inserting the deleted character
-    // if (latest.command == UNDO_DELETE) {
-    //     editorRowInsertChar(&E.row[latest.row], latest.cx, latest.c);
-    // }
     // Handle undoing an insertion by deleting the inserted character
     if (latest.command == UNDO_INSERT) {
         editorRowDelChar(&E.row[latest.row], latest.cx);
         E.cx--;
+    }
+    // Handle undoing an insertion by inserting the deleted character
+    else if (latest.command == UNDO_DELETE) {
+        editorRowInsertChar(&E.row[latest.row], latest.cx, latest.c);
+        E.cx++;
     }
 
     // Decrement number of undo operations in the buffer
